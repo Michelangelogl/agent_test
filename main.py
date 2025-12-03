@@ -1,66 +1,45 @@
 import uuid
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+import asyncio
+from flask import Flask, request, jsonify
 
 from python_a2a import A2AClient, Message, TextContent, MessageRole, Task
 
-
-app = FastAPI(
-    title="Dify A2A API",
-    description="通过 A2A 协议调用 DifyAgentServer 的 HTTP 接口",
-)
-
-# 注意：这里的地址需要和你启动 DifyServer 时的 host/port 保持一致
+app = Flask(__name__)
 dify_client = A2AClient("http://127.0.0.1:5010")
 
 
-class DifyQueryRequest(BaseModel):
-    query: str
+@app.route("/")
+def index():
+    return jsonify({"message": "Dify A2A API", "endpoint": "/dify_query"})
 
 
-class DifyQueryResponse(BaseModel):
-    answer: str
+@app.route("/dify_query", methods=["POST"])
+def dify_query():
+    data = request.json or {}
+    query = data.get("query", "").strip()
 
-
-@app.post("/dify_query", response_model=DifyQueryResponse)
-async def dify_query(body: DifyQueryRequest):
-    """
-    调用 DifyAgentServer 的简单 HTTP 接口：
-    - 请求体：{"query": "你的问题"}
-    - 返回：{"answer": "Dify 的回复文本"}
-    """
-    query = body.query.strip()
     if not query:
-        raise HTTPException(status_code=400, detail="查询内容不能为空")
+        return jsonify({"error": "查询内容不能为空"}), 400
 
-    # 构造 A2A Task
     message = Message(content=TextContent(text=query), role=MessageRole.USER)
-    task = Task(id="task-" + str(uuid.uuid4()), message=message.to_dict())
+    task = Task(id=f"task-{uuid.uuid4()}", message=message.to_dict())
 
     try:
-        # 调用 Dify A2A Server
-        result_task = await dify_client.send_task_async(task)
+        result_task = asyncio.run(dify_client.send_task_async(task))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"调用 DifyAgentServer 失败: {e}")
+        return jsonify({"error": f"调用失败: {e}"}), 502
 
-    # 处理返回结果
-    state = str(result_task.status.state)
-    if state == "completed":
+    if str(result_task.status.state) == "completed":
         try:
             answer = result_task.artifacts[0]["parts"][0]["text"]
+            return jsonify({"answer": answer})
         except Exception:
-            raise HTTPException(status_code=500, detail="DifyAgentServer 返回格式异常，未找到文本结果")
-        return DifyQueryResponse(answer=answer)
+            return jsonify({"error": "返回格式异常"}), 500
     else:
-        # 其它状态：input-required / failed 等，统一转为错误信息
-        msg = (result_task.status.message or {}).get("content", {}).get("text", "DifyAgentServer 调用失败")
-        raise HTTPException(status_code=500, detail=f"状态: {state}, 信息: {msg}")
+        return jsonify({"error": "调用失败"}), 500
 
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8010)
+    app.run(host="0.0.0.0", port=8010)
 
 
